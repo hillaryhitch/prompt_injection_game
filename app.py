@@ -5,6 +5,8 @@ from datetime import datetime
 import random
 import json
 from dotenv import load_dotenv
+import pandas as pd
+from pathlib import Path
 
 # Load environment variables
 load_dotenv()
@@ -105,6 +107,18 @@ st.markdown("""
             color: inherit;
             font-family: 'Courier New', monospace;
         }
+        
+        /* Leaderboard Styles */
+        .leaderboard {
+            background-color: #2d2d2d;
+            border: 2px solid #00ffff;
+            padding: 20px;
+            border-radius: 5px;
+        }
+        .dataframe {
+            font-family: 'Courier New', monospace;
+            color: #00ff00 !important;
+        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -170,8 +184,77 @@ def initialize_session_state():
         st.session_state.chat_history = []
     if 'level_attempts' not in st.session_state:
         st.session_state.level_attempts = {}
+    if 'total_attempts' not in st.session_state:
+        st.session_state.total_attempts = 0
     if 'anthropic_client' not in st.session_state:
         st.session_state.anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+def load_leaderboard():
+    """Load leaderboard data from JSON file"""
+    leaderboard_file = Path("leaderboard.json")
+    if leaderboard_file.exists():
+        with open(leaderboard_file, "r") as f:
+            return json.load(f)
+    return []
+
+def save_leaderboard(leaderboard_data):
+    """Save leaderboard data to JSON file"""
+    with open("leaderboard.json", "w") as f:
+        json.dump(leaderboard_data, f, indent=4)
+
+def update_leaderboard(player_name, level, total_attempts):
+    """Update leaderboard with new player data"""
+    leaderboard = load_leaderboard()
+    
+    # Create new entry
+    new_entry = {
+        "player": player_name,
+        "level": level,
+        "attempts": total_attempts,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    
+    # Add new entry and sort by level (descending) and attempts (ascending)
+    leaderboard.append(new_entry)
+    leaderboard.sort(key=lambda x: (-x["level"], x["attempts"]))
+    
+    # Keep only top 10 entries
+    leaderboard = leaderboard[:10]
+    
+    # Save updated leaderboard
+    save_leaderboard(leaderboard)
+    return leaderboard
+
+def display_leaderboard():
+    """Display leaderboard in the UI"""
+    st.markdown("""
+        <div class="main-box">
+            <div class="subtitle">🏆 Leaderboard</div>
+        </div>
+    """, unsafe_allow_html=True)
+    
+    leaderboard = load_leaderboard()
+    
+    if not leaderboard:
+        st.info("No entries yet. Be the first to make it to the leaderboard!")
+        return
+    
+    # Create a DataFrame for better display
+    leaderboard_df = pd.DataFrame(leaderboard)
+    leaderboard_df.index = range(1, len(leaderboard_df) + 1)  # 1-based ranking
+    
+    # Style the DataFrame
+    st.dataframe(
+        leaderboard_df[["player", "level", "attempts", "timestamp"]],
+        column_config={
+            "player": "Player",
+            "level": "Level",
+            "attempts": "Total Attempts",
+            "timestamp": "Achieved On"
+        },
+        hide_index=False,
+        use_container_width=True
+    )
 
 def display_rules_page():
     st.markdown("""
@@ -201,7 +284,12 @@ def display_name_input():
     
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        name = st.text_input("", placeholder="Enter your name", key="name_input")
+        name = st.text_input(
+            "Player Name", 
+            placeholder="Enter your name", 
+            key="name_input",
+            label_visibility="collapsed"  # This hides the label but keeps it accessible
+        )
         
         if name:
             st.markdown(f"""
@@ -226,10 +314,10 @@ def display_name_input():
 def get_ai_response(user_input, level):
     """Get response from Claude"""
     try:
-        message = st.session_state.anthropic_client.messages.create(
+        message = st.session_state.anthropic_client.completions.create(
             model="claude-3-sonnet-20240229",
-            max_tokens=1024,
-            messages=[
+            max_tokens_to_sample=1024,
+            prompt=[
                 {"role": "system", "content": LEVELS[level]['system_prompt']},
                 {"role": "user", "content": user_input}
             ]
@@ -241,40 +329,50 @@ def get_ai_response(user_input, level):
 def display_game_page():
     level = st.session_state.current_level
     
-    st.markdown(f"""
-        <div class="main-box">
-            <div class="title">{LEVELS[level]['name']} - Level {level}</div>
-            <div class="rule-text"><strong>Objective:</strong> {LEVELS[level]['objective']}</div>
-            <div class="rule-text"><strong>Attempts Remaining:</strong> {LEVELS[level]['max_attempts'] - len(st.session_state.level_attempts.get(level, []))}</div>
-            
-    """, unsafe_allow_html=True)
+    # Create two columns - one for game, one for leaderboard
+    game_col, leaderboard_col = st.columns([2, 1])
     
-    # Chat history
-    for message in st.session_state.chat_history:
-        style_class = "user-message" if message["role"] == "user" else "ai-message"
-        role_name = "You" if message["role"] == "user" else "AI"
+    with game_col:
         st.markdown(f"""
-            <div class="chat-message {style_class}">
-                <strong>{role_name}:</strong> {message["content"]}
-            </div>
+            <div class="main-box">
+                <div class="title">{LEVELS[level]['name']} - Level {level}</div>
+                <div class="rule-text"><strong>Objective:</strong> {LEVELS[level]['objective']}</div>
+                <div class="rule-text"><strong>Attempts Remaining:</strong> {LEVELS[level]['max_attempts'] - len(st.session_state.level_attempts.get(level, []))}</div>
+                <div class="rule-text"><strong>Total Attempts:</strong> {st.session_state.total_attempts}</div>
         """, unsafe_allow_html=True)
+        
+        # Chat history
+        for message in st.session_state.chat_history:
+            style_class = "user-message" if message["role"] == "user" else "ai-message"
+            role_name = "You" if message["role"] == "user" else "AI"
+            st.markdown(f"""
+                <div class="chat-message {style_class}">
+                    <strong>{role_name}:</strong> {message["content"]}
+                </div>
+            """, unsafe_allow_html=True)
+        
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        # Input area
+        user_input = st.text_area(
+            "Chat Input", 
+            placeholder="Type your message here...",
+            key="user_input",
+            label_visibility="collapsed"  # This hides the label but keeps it accessible
+        )
+        
+        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+        with col2:
+            if st.button("Send", key="send_message"):
+                if user_input:
+                    process_user_input(user_input, level)
+        
+        with col3:
+            if st.button("Get Hint", key="get_hint"):
+                st.info(LEVELS[level]['hint'])
     
-    st.markdown("</div>", unsafe_allow_html=True)
-    
-    # Input area
-    user_input = st.text_area("Your message:", key="user_input")
-    
-    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
-    with col2:
-        if st.button("Send", key="send_message"):
-            if user_input:
-                process_user_input(user_input, level)
-    
-    with col3:
-        if st.button("Get Hint", key="get_hint"):
-            st.info(LEVELS[level]['hint'])
-    
-    st.markdown("</div>", unsafe_allow_html=True)
+    with leaderboard_col:
+        display_leaderboard()
 
 def process_user_input(user_input, level):
     """Process user input and check for level completion"""
@@ -282,6 +380,7 @@ def process_user_input(user_input, level):
         st.session_state.level_attempts[level] = []
     
     st.session_state.level_attempts[level].append(user_input)
+    st.session_state.total_attempts += 1  # Increment total attempts
     ai_response = get_ai_response(user_input, level)
     
     st.session_state.chat_history.append({"role": "user", "content": user_input})
@@ -294,9 +393,21 @@ def process_user_input(user_input, level):
             st.success(f"🎉 Congratulations! You've completed Level {level}!")
             st.session_state.current_level += 1
             st.session_state.chat_history = []
+            # Update leaderboard for level completion
+            update_leaderboard(
+                st.session_state.player_name,
+                level,
+                st.session_state.total_attempts
+            )
         else:
             st.balloons()
             st.success("🏆 Congratulations! You've completed all levels!")
+            # Update leaderboard for game completion
+            update_leaderboard(
+                st.session_state.player_name,
+                level,
+                st.session_state.total_attempts
+            )
     
     # Check for max attempts
     if len(st.session_state.level_attempts[level]) >= LEVELS[level]['max_attempts']:
